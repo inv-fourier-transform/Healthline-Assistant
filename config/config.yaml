@@ -1,0 +1,28 @@
+# /config/config.yaml
+
+ingestion:
+  allowed_domain: healthline.com
+  max_urls: 10
+  unstructured_mode: single
+
+chunking:
+  chunk_size: 1000
+  # chunk_overlap: 200
+
+embeddings:
+  # Uses the environment variable defined in .env
+  model: ${EMBEDDING_MODEL}
+
+vectorstore:
+  collection_name: healthline_rag
+  # Use this Python expression at runtime to resolve the directory:
+  # Path(__file__).parent / "vector_resources/vectorstore"
+  persist_directory_expr: "Path(__file__).parent / 'vector_resources/vectorstore'"
+
+llm:
+  groq_model: llama-3.1-8b-instant
+  temperature: 0.2
+  max_tokens: 512
+
+retrieval:
+  k: 5
