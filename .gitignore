@@ -1,2 +1,4 @@
 .env
 config/vector_resources/
+config/.env
+config/vector_resources/
