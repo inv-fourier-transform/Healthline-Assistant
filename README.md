@@ -1,4 +1,4 @@
-# Healthline Assistant — RAG chatbot for trusted articles 🩺⚡️
+# Healthline Assistant: RAG-based chatbot for articles 🩺⚡️
 
 A fast, grounded, Healthline‑only chatbot that builds local embeddings from provided URLs and answers strictly from those sources.
 
@@ -48,6 +48,13 @@ Healthcare_Assistant/
 ---
 
 ## ⚙️ Installation Steps
+
+> ⚠️ **Note:** You must create a `.env` file inside the `config/` folder and provide the following variables:  
+> - `GROQ_API_KEY`  
+> - `CHROMA_DIR`  
+> - `GROQ_MODEL`  
+> - `EMBEDDING_MODEL`  
+
 
 ```bash
 # 1) Python and virtual environment
