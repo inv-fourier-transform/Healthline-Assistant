@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # Healthline Assistant: RAG-based chatbot for articles 🩺⚡️
+=======
+  # Healthline Assistant: RAG-based chatbot for articles 🩺⚡️
+>>>>>>> b142600dd8a1c5b4f494cefa1aa5bf71762105ad
 
 A fast, grounded, Healthline‑only chatbot that builds local embeddings from provided URLs and answers strictly from those sources.
 
