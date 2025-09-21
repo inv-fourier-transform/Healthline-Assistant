@@ -142,6 +142,14 @@ Detects duplicates across formats using canonical form (e.g., `healthline.com/..
 
 ---
 
+## 📌 Quick Tips
+
+- Re‑indexing resets prior embeddings; keep distinct sessions per topic for focused retrieval.  
+- Use precise, article‑aligned queries; for multi‑article tasks, the system can summarize each article separately.  
+- If a fact isn’t in the supplied Healthline sources, the assistant will return the exact fallback rather than hallucinate.
+
+---  
+
 ## 🛠️ Technologies Used
 
 - ✅ Python 3.10+  
@@ -174,11 +182,3 @@ Detects duplicates across formats using canonical form (e.g., `healthline.com/..
 ## ⚠️ Disclaimer
 
 “All rights to the content in the provided URLs belong solely to Healthline Media LLC.”  
-
----
-
-## 📌 Quick Tips
-
-- Re‑indexing resets prior embeddings; keep distinct sessions per topic for focused retrieval.  
-- Use precise, article‑aligned queries; for multi‑article tasks, the system can summarize each article separately.  
-- If a fact isn’t in the supplied Healthline sources, the assistant will return the exact fallback rather than hallucinate.  
