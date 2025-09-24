@@ -90,10 +90,19 @@ if not HAVE_BACKEND:
     from langchain_groq import ChatGroq
 
     def _llm():
-        model = st.secrets.get("llm", {}).get("MODEL", "llama-3.1-8b-instant")
-        temperature = float(st.secrets.get("llm", {}).get("TEMPERATURE", 0.0))
-        max_tokens = int(st.secrets.get("llm", {}).get("MAX_TOKENS", 512))
+        groq_key = st.secrets.get("api", {}).get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", "")).strip()
+        if not groq_key:
+            st.error("GROQ_API_KEY is not set. Add it in Streamlit Secrets under [api].")
+            st.stop()
+
+        model = st.secrets.get("llm", {}).get("MODEL", os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"))
+        temperature = float(st.secrets.get("llm", {}).get("TEMPERATURE", os.getenv("GROQ_TEMPERATURE", "0.0")))
+        max_tokens = int(st.secrets.get("llm", {}).get("MAX_TOKENS", os.getenv("GROQ_MAX_TOKENS", "512")))
+
+        os.environ["GROQ_API_KEY"] = groq_key
+        from langchain_groq import ChatGroq
         return ChatGroq(model=model, temperature=temperature, max_tokens=max_tokens)
+
 
     def _load_urls(urls: list[str]):
         clean = []
