@@ -21,3 +21,4 @@ python-magic-bin; sys_platform == "win32"
 python-magic; sys_platform != "win32"
 pydantic>=2.6.0
 pyyaml>=6.0.1
+
