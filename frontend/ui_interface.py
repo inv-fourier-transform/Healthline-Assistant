@@ -5,33 +5,24 @@ from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 import streamlit as st
 
-# ---------------- Page setup ----------------
+# ================= Page & runtime config =================
 st.set_page_config(page_title="Healthline Assistant", layout="wide")
 
-
+# Streamlit Cloud writable vectorstore directory
 APP_ROOT = Path(__file__).resolve().parent
 CHROMA_DIR = st.secrets.get("paths", {}).get("CHROMA_DIR", "vector_resources/vectorstore")
 VECTORSTORE_PATH = (APP_ROOT / CHROMA_DIR).resolve()
 VECTORSTORE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("CHROMA_DIR", str(VECTORSTORE_PATH))
 
-# ---------------- Try backend imports; fallback inline if unavailable ----------------
-try:
-    from core.indexer import build_index as backend_build_index
-    from core.qa import answer_query as backend_answer_query
-    HAVE_BACKEND = True
-except Exception:
-    HAVE_BACKEND = False
-
-# ---------------- Embedding factory (robust fallbacks) ----------------
+# ================= Robust embedding loader =================
 def build_embeddings(model_name: str, normalize: bool = True):
     """
-    Load embeddings with a priority:
-    1) langchain_huggingface.HuggingFaceEmbeddings (preferred)
-    2) langchain_community.embeddings.HuggingFaceEmbeddings (fallback)
-    3) sentence-transformers direct (only if installed)
+    Priority:
+      1) langchain_huggingface.HuggingFaceEmbeddings
+      2) langchain_community.embeddings.HuggingFaceEmbeddings
+      3) sentence-transformers direct (if installed)
     """
-    # Preferred provider
     try:
         from langchain_huggingface.embeddings import HuggingFaceEmbeddings as LC_HFEmb
         return LC_HFEmb(
@@ -41,8 +32,6 @@ def build_embeddings(model_name: str, normalize: bool = True):
         )
     except Exception:
         pass
-
-    # Community fallback
     try:
         from langchain_community.embeddings import HuggingFaceEmbeddings as LC_CommEmb
         return LC_CommEmb(
@@ -52,8 +41,6 @@ def build_embeddings(model_name: str, normalize: bool = True):
         )
     except Exception:
         pass
-
-    # Direct ST fallback only if sentence-transformers is installed
     try:
         from sentence_transformers import SentenceTransformer
         from langchain_core.embeddings import Embeddings
@@ -63,136 +50,132 @@ def build_embeddings(model_name: str, normalize: bool = True):
                 self.m = m
                 self.norm = norm
             def embed_documents(self, texts):
-                return self.m.encode(
-                    texts, normalize_embeddings=self.norm, convert_to_numpy=False, show_progress_bar=False
-                )
+                return self.m.encode(texts, normalize_embeddings=self.norm, convert_to_numpy=False, show_progress_bar=False)
             def embed_query(self, text):
-                return self.m.encode(
-                    [text], normalize_embeddings=self.norm, convert_to_numpy=False, show_progress_bar=False
-                )[0]
-
+                return self.m.encode([text], normalize_embeddings=self.norm, convert_to_numpy=False, show_progress_bar=False)[0]
         st_model = SentenceTransformer(model_name, trust_remote_code=True)
         return _STWrap(st_model, normalize)
-    except Exception as e:
-        st.error(
-            "Embeddings backend is not available. Please ensure transformers and sentence-transformers "
-            "are installed per requirements.txt, or switch to a supported model."
-        )
-        raise
+    except Exception:
+        st.error("Embeddings backend unavailable. Ensure transformers and sentence-transformers are installed.")
+        st.stop()
 
-# ---------------- Inline backend (only if core.* is unavailable) ----------------
-if not HAVE_BACKEND:
-    from langchain_chroma import Chroma
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.document_loaders import UnstructuredURLLoader
-    from langchain_core.prompts import ChatPromptTemplate
-    from langchain.chains.combine_documents import create_stuff_documents_chain
-    from langchain_groq import ChatGroq
+# ================= Strict QA primitives (always grounded) =================
+from langchain_chroma import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import UnstructuredURLLoader
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_groq import ChatGroq
 
-    def _llm():
-        groq_key = st.secrets.get("api", {}).get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", "")).strip()
-        if not groq_key:
-            st.error("GROQ_API_KEY is not set. Add it in Streamlit Secrets under [api].")
-            st.stop()
+FALLBACK = 'No relevant information could be found in the provided sources.'
+COLLECTION = "healthline_rag"
 
-        model = st.secrets.get("llm", {}).get("MODEL", os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"))
-        temperature = float(st.secrets.get("llm", {}).get("TEMPERATURE", os.getenv("GROQ_TEMPERATURE", "0.0")))
-        max_tokens = int(st.secrets.get("llm", {}).get("MAX_TOKENS", os.getenv("GROQ_MAX_TOKENS", "512")))
+def _llm():
+    groq_key = st.secrets.get("api", {}).get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", "")).strip()
+    if not groq_key:
+        st.error("GROQ_API_KEY is not set. Add it in Streamlit Secrets under [api].")
+        st.stop()
+    os.environ["GROQ_API_KEY"] = groq_key
+    model = st.secrets.get("llm", {}).get("MODEL", os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"))
+    temperature = float(st.secrets.get("llm", {}).get("TEMPERATURE", os.getenv("GROQ_TEMPERATURE", "0.0")))
+    max_tokens = int(st.secrets.get("llm", {}).get("MAX_TOKENS", os.getenv("GROQ_MAX_TOKENS", "512")))
+    return ChatGroq(model=model, temperature=temperature, max_tokens=max_tokens)
 
-        os.environ["GROQ_API_KEY"] = groq_key
-        from langchain_groq import ChatGroq
-        return ChatGroq(model=model, temperature=temperature, max_tokens=max_tokens)
-
-
-    def _load_urls(urls: list[str]):
-        clean = []
-        for u in urls:
-            u = (u or "").strip()
-            if u and u.startswith("http") and "healthline.com" in u:
-                clean.append(u)
-        if not clean:
-            return []
-        loader = UnstructuredURLLoader(urls=clean, continue_on_failure=True, show_progress_bar=False)
-        docs = loader.load()
-        out = []
-        for d in docs:
-            if getattr(d, "page_content", "").strip():
-                if "source" not in d.metadata:
-                    d.metadata["source"] = d.metadata.get("url", "")
-                out.append(d)
-        return out
-
-    def _chunk(docs, size=1000, overlap=200):
-        return RecursiveCharacterTextSplitter(chunk_size=size, chunk_overlap=overlap).split_documents(docs)
-
-    def build_index(urls: list[str]):
-        docs = _load_urls(urls)
-        if not docs:
-            return {"status": "no_content", "chunks_indexed": 0, "errors": ["No valid Healthline content loaded."]}
-
-        chunks = _chunk(docs)
-        if not chunks:
-            return {"status": "no_chunks", "chunks_indexed": 0, "errors": ["Chunking produced no segments."]}
-
-        # Reset vectorstore dir
-        import shutil
-        if VECTORSTORE_PATH.exists():
-            shutil.rmtree(VECTORSTORE_PATH, ignore_errors=True)
-        VECTORSTORE_PATH.mkdir(parents=True, exist_ok=True)
-
-        emb_model = st.secrets.get("embeddings", {}).get("MODEL", "BAAI/bge-base-en-v1.5")
-        emb = build_embeddings(emb_model, normalize=True)
-        _ = Chroma.from_documents(
-            documents=chunks,
-            embedding=emb,
-            collection_name="healthline_rag",
-            persist_directory=str(VECTORSTORE_PATH),
-        )
-        return {"status": "ok", "chunks_indexed": len(chunks), "errors": []}
-
-    def answer_query(query: str):
-        emb_model = st.secrets.get("embeddings", {}).get("MODEL", "BAAI/bge-base-en-v1.5")
-        emb = build_embeddings(emb_model, normalize=True)
-        vs = Chroma(
-            collection_name="healthline_rag",
-            embedding_function=emb,
-            persist_directory=str(VECTORSTORE_PATH),
-        )
-        retriever = vs.as_retriever(search_kwargs={"k": 8})
-        docs = retriever.get_relevant_documents(query)
-        if not docs:
-            return {"answer": "No relevant information could be found in the provided sources.", "sources": []}
-
-        llm = _llm()
-        system = """You must answer using only the provided context.
-Do not include links or references in your answer.
-If the answer is not present, reply exactly: "No relevant information could be found in the provided sources."
+STRICT_SYSTEM = """You are a healthcare assistant that must answer strictly and only from the provided context.
+- Do not use any external knowledge.
+- Do not add links, references, or sources in your text.
+- If the answer is not present, reply exactly: "No relevant information could be found in the provided sources."
 Context:
 {context}"""
-        prompt = ChatPromptTemplate.from_messages([("system", system), ("human", "{input}")])
-        chain = create_stuff_documents_chain(llm, prompt)
-        resp = chain.invoke({"input": query, "context": docs})
-        answer = resp if isinstance(resp, str) else (resp.get("answer") or resp.get("output") or "")
 
-        seen, sources = set(), []
-        for d in docs:
-            src = d.metadata.get("source", "")
-            if src and src not in seen:
-                seen.add(src)
-                sources.append(src)
+def _load_urls(urls: list[str]):
+    cleaned = []
+    for u in urls:
+        u = (u or "").strip()
+        if u and u.startswith("http") and "healthline.com" in u:
+            cleaned.append(u)
+    if not cleaned:
+        return []
+    loader = UnstructuredURLLoader(urls=cleaned, continue_on_failure=True, show_progress_bar=False)
+    docs = loader.load()
+    out = []
+    for d in docs:
+        if getattr(d, "page_content", "").strip():
+            if "source" not in d.metadata:
+                d.metadata["source"] = d.metadata.get("url", "")
+            out.append(d)
+    return out
 
-        if not (answer or "").strip():
-            return {"answer": "No relevant information could be found in the provided sources.", "sources": []}
-        return {"answer": answer, "sources": sources}
-else:
-    # If your packaged backend is importable, use it
-    def build_index(urls: list[str]):
-        return backend_build_index(urls)
+def _chunk(docs, size=1000, overlap=200):
+    return RecursiveCharacterTextSplitter(chunk_size=size, chunk_overlap=overlap).split_documents(docs)
 
-    def answer_query(query: str):
-        return backend_answer_query(query)
+def reset_vector_dir(path: Path):
+    import shutil
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
 
-# ---------------- Styles ----------------
+def build_index(urls: list[str]) -> dict:
+    docs = _load_urls(urls)
+    if not docs:
+        return {"status": "no_content", "chunks_indexed": 0, "errors": ["No valid Healthline content loaded."]}
+    chunks = _chunk(docs)
+    if not chunks:
+        return {"status": "no_chunks", "chunks_indexed": 0, "errors": ["Chunking produced no segments."]}
+
+    reset_vector_dir(VECTORSTORE_PATH)
+    emb_model = st.secrets.get("embeddings", {}).get("MODEL", os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+    emb = build_embeddings(emb_model, normalize=True)
+    _ = Chroma.from_documents(
+        documents=chunks,
+        embedding=emb,
+        collection_name=COLLECTION,
+        persist_directory=str(VECTORSTORE_PATH),
+    )
+    return {"status": "ok", "chunks_indexed": len(chunks), "errors": []}
+
+def get_retriever(k: int = 8):
+    emb_model = st.secrets.get("embeddings", {}).get("MODEL", os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+    emb = build_embeddings(emb_model, normalize=True)
+    vs = Chroma(
+        collection_name=COLLECTION,
+        embedding_function=emb,
+        persist_directory=str(VECTORSTORE_PATH),
+    )
+    return vs.as_retriever(search_kwargs={"k": max(8, int(k))})
+
+def answer_query_strict(query: str) -> dict:
+    """
+    Strictly grounded QA:
+    - Retrieve first; if no docs => exact fallback and no sources.
+    - Otherwise, call LLM with strict prompt and pass only retrieved docs.
+    - Sources are computed from doc metadata (not model output).
+    """
+    retriever = get_retriever()
+    docs = retriever.get_relevant_documents(query)
+    if not docs:
+        return {"answer": FALLBACK, "sources": []}
+
+    llm = _llm()
+    prompt = ChatPromptTemplate.from_messages([("system", STRICT_SYSTEM), ("human", "{input}")])
+    chain = create_stuff_documents_chain(llm, prompt)
+    resp = chain.invoke({"input": query, "context": docs})
+    answer = resp if isinstance(resp, str) else (resp.get("answer") or resp.get("output") or "")
+
+    # Build sources strictly from retrieved docs
+    seen, sources = set(), []
+    for d in docs:
+        src = d.metadata.get("source", "")
+        if src and src not in seen:
+            seen.add(src)
+            sources.append(src)
+
+    normalized = (answer or "").strip().lower()
+    if not normalized or FALLBACK.lower() in normalized:
+        return {"answer": FALLBACK, "sources": []}
+    return {"answer": answer, "sources": sources}
+
+# ================= UI styling =================
 st.markdown("""
 <style>
 :root { --bg-primary:#0e1117; --bg-panel-1:#111827; --bg-panel-2:#0f172a; --bg-response:#1f2937;
@@ -218,10 +201,10 @@ button[disabled] { background:#2f3542!important; color:#9aa3af!important; border
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- Title ----------------
+# ================= Title =================
 st.markdown('<div id="app-title"><span class="icon">🩺</span>Healthline Assistant</div>', unsafe_allow_html=True)
 
-# ---------------- Session state ----------------
+# ================= Session state =================
 if "urls_ok" not in st.session_state: st.session_state.urls_ok = False
 if "validated_urls" not in st.session_state: st.session_state.validated_urls = []
 if "index_ready" not in st.session_state: st.session_state.index_ready = False
@@ -232,7 +215,7 @@ if "last_sources" not in st.session_state: st.session_state.last_sources = []
 for i in range(10):
     st.session_state.setdefault(f"url_{i}", "")
 
-# ---------------- URL helpers ----------------
+# ================= URL helpers =================
 def is_valid_healthline_prefix(u: str) -> bool:
     if not isinstance(u, str):
         return False
@@ -266,10 +249,10 @@ def canonicalize_healthline(u: str) -> str | None:
         path = path[:-1]
     return urlunparse((scheme, netloc, path, "", "", ""))
 
-# ---------------- Layout ----------------
+# ================= Layout =================
 left, right = st.columns([1.2, 2.0])
 
-# ===== Left: URLs + Index =====
+# ----- Left: URLs + Index -----
 with left:
     st.markdown('<div class="section-label">Enter up to 10 Healthline URLs (one per line)</div>', unsafe_allow_html=True)
     for i in range(10):
@@ -281,12 +264,8 @@ with left:
         )
 
     if st.button("Validate & Submit URLs"):
-        raw_urls = []
-        for i in range(10):
-            val = (st.session_state.get(f"url_{i}", "") or "").strip()
-            if val:
-                raw_urls.append(val)
-
+        raw_urls = [(st.session_state.get(f"url_{i}", "") or "").strip() for i in range(10)]
+        raw_urls = [u for u in raw_urls if u]
         if not raw_urls:
             st.session_state.urls_ok = False
             st.session_state.index_ready = False
@@ -306,15 +285,11 @@ with left:
                     else:
                         seen.add(c)
                         canonical_list.append(c)
-
             if invalids:
                 st.session_state.urls_ok = False
                 st.session_state.index_ready = False
                 st.session_state.show_response = False
-                st.error(
-                    "Invalid URL format detected. A valid URL must start with one of: "
-                    "https://www.healthline.com, www.healthline.com, or healthline.com."
-                )
+                st.error("Invalid URL format. Allowed starts: https://www.healthline.com, www.healthline.com, healthline.com.")
                 for bad in invalids:
                     st.warning(f"Rejected: {bad}")
             elif duplicates:
@@ -340,7 +315,7 @@ with left:
                     for e in errs:
                         st.warning(e)
 
-# ===== Right: Query + Response =====
+# ----- Right: Query + Response -----
 with right:
     query = st.text_area("Query", placeholder="Enter your query", height=220)
     submit_query_disabled = (not st.session_state.get("urls_ok")) or (not st.session_state.get("index_ready")) or (not query.strip())
@@ -349,7 +324,7 @@ with right:
     if clicked and not submit_query_disabled:
         st.session_state.last_query = query.strip()
         with st.spinner("Retrieving and generating response..."):
-            resp = answer_query(st.session_state.last_query)
+            resp = answer_query_strict(st.session_state.last_query)
         st.session_state.last_answer = resp.get("answer", "")
         st.session_state.last_sources = resp.get("sources", [])
         st.session_state.show_response = True
@@ -359,12 +334,12 @@ with right:
         if st.session_state.last_answer:
             st.markdown(st.session_state.last_answer)
         else:
-            st.markdown("_No answer generated from the provided sources._")
+            st.markdown(f"_{FALLBACK}_")
         if st.session_state.last_sources:
             st.markdown('<div class="response-title">Sources</div>', unsafe_allow_html=True)
             for src in st.session_state.last_sources:
                 st.markdown(f"- {src}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------- Footer ----------------
+# Footer
 st.markdown('<div class="disclaimer">“All rights to the content in the provided URLs belong solely to Healthline Media LLC.”</div>', unsafe_allow_html=True)
